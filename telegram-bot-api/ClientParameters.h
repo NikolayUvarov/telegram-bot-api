@@ -120,7 +120,7 @@ struct ClientParameters {
   td::int32 default_max_webhook_connections_ = 0;
   td::IPAddress webhook_proxy_ip_address_;
 
-  MTProxy mtproxy_;  // MTProxy for connections to Telegram, empty if not used
+  MTProxyOptions mtproxy_options_;
 
   double start_time_ = 0;
 

@@ -67,6 +67,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/HttpConnection.cpp
   telegram-bot-api/HttpStatConnection.cpp
   telegram-bot-api/MTProxy.cpp
+  telegram-bot-api/MTProxyManager.cpp
   telegram-bot-api/Query.cpp
   telegram-bot-api/Stats.cpp
   telegram-bot-api/Watchdog.cpp
@@ -79,6 +80,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/HttpServer.h
   telegram-bot-api/HttpStatConnection.h
   telegram-bot-api/MTProxy.h
+  telegram-bot-api/MTProxyManager.h
   telegram-bot-api/Query.h
   telegram-bot-api/Stats.h
   telegram-bot-api/Watchdog.h

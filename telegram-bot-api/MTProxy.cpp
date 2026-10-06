@@ -89,8 +89,99 @@ td::Result<MTProxy> MTProxy::parse(td::Slice link) {
   MTProxy result;
   result.server_ = server.str();
   result.port_ = r_port.ok();
-  result.secret_ = std::move(secret_str);
+  result.secret_ = r_secret.ok().get_encoded_secret();
   return std::move(result);
+}
+
+td::string MTProxy::get_key() const {
+  return PSTRING() << td::to_lower(server_) << ':' << port_ << ':' << secret_;
+}
+
+td::string MTProxy::get_link() const {
+  return PSTRING() << "tg://proxy?server=" << td::url_encode(server_) << "&port=" << port_
+                   << "&secret=" << td::url_encode(secret_);
+}
+
+td::Slice MTProxy::get_secret_type() const {
+  auto r_secret = td::mtproto::ProxySecret::from_link(secret_);
+  if (r_secret.is_error()) {
+    return td::Slice();
+  }
+  if (r_secret.ok().emulate_tls()) {
+    return td::Slice("ee");
+  }
+  if (r_secret.ok().use_random_padding()) {
+    return td::Slice("dd");
+  }
+  return td::Slice("simple");
+}
+
+td::string MTProxy::get_domain() const {
+  auto r_secret = td::mtproto::ProxySecret::from_link(secret_);
+  if (r_secret.is_error() || !r_secret.ok().emulate_tls()) {
+    return td::string();
+  }
+  return r_secret.ok().get_domain();
+}
+
+td::vector<td::string> MTProxy::find_links(td::Slice text) {
+  static const char *const MARKERS[] = {"tg://proxy?", "tg:proxy?", "t.me/proxy?", "telegram.me/proxy?",
+                                        "telegram.dog/proxy?"};
+  auto is_link_end = [](char c) {
+    return static_cast<unsigned char>(c) <= ' ' || static_cast<unsigned char>(c) >= 0x80 || c == '"' || c == '\'' ||
+           c == '<' || c == '>' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}' || c == '|' ||
+           c == '\\' || c == '^' || c == '`';
+  };
+
+  td::vector<td::string> links;
+  auto lower_text = td::to_lower(text);
+  size_t pos = 0;
+  while (true) {
+    size_t begin = td::string::npos;
+    for (auto marker : MARKERS) {
+      begin = td::min(begin, lower_text.find(marker, pos));
+    }
+    if (begin == td::string::npos) {
+      break;
+    }
+
+    td::string prefix;
+    if (!td::begins_with(td::Slice(lower_text).substr(begin), "tg:")) {
+      if (begin >= 4 && td::Slice(lower_text).substr(begin - 4, 4) == "www.") {
+        begin -= 4;
+      }
+      if (begin >= 8 && td::Slice(lower_text).substr(begin - 8, 8) == "https://") {
+        begin -= 8;
+      } else if (begin >= 7 && td::Slice(lower_text).substr(begin - 7, 7) == "http://") {
+        begin -= 7;
+      } else {
+        prefix = "https://";
+      }
+    }
+    auto end = begin;
+    while (end < text.size() && !is_link_end(text[end])) {
+      end++;
+    }
+    pos = end;
+    while (end > begin && td::Slice(".,;:!?").find(text[end - 1]) != td::Slice::npos) {
+      end--;
+    }
+    links.push_back(prefix + text.substr(begin, end - begin).str());
+  }
+
+  auto trimmed_text = td::trim(text);
+  if (links.empty() && !trimmed_text.empty()) {
+    bool has_spaces = false;
+    for (auto c : trimmed_text) {
+      if (static_cast<unsigned char>(c) <= ' ') {
+        has_spaces = true;
+      }
+    }
+    if (!has_spaces) {
+      links.push_back(trimmed_text.str());
+    }
+  }
+  return links;
 }
 
 td::StringBuilder &operator<<(td::StringBuilder &sb, const MTProxy &proxy) {

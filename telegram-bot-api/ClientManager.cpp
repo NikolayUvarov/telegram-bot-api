@@ -84,6 +84,11 @@ void ClientManager::send(PromisedQueryPtr query) {
     return fail_query(401, "Unauthorized: invalid token specified", std::move(query));
   }
 
+  if (MTProxyManager::is_mtproxy_method(query->method())) {
+    // the registry works even without connection to Telegram
+    return send_closure(mtproxy_manager_, &MTProxyManager::send, user_id, std::move(query));
+  }
+
   if (query->is_test_dc()) {
     token += "/test";
   }
@@ -138,9 +143,9 @@ void ClientManager::send(PromisedQueryPtr query) {
     auto id =
         clients_.create(ClientInfo{BotStatActor(stat_.actor_id(&stat_)), token, tqueue_id, td::ActorOwn<Client>()});
     auto *client_info = clients_.get(id);
-    client_info->client_ = td::create_actor<Client>(PSLICE() << "Client/" << token, actor_shared(this, id),
-                                                    query->token().str(), query->is_test_dc(), tqueue_id, parameters_,
-                                                    client_info->stat_.actor_id(&client_info->stat_));
+    client_info->client_ = td::create_actor<Client>(
+        PSLICE() << "Client/" << token, actor_shared(this, id), query->token().str(), query->is_test_dc(), tqueue_id,
+        parameters_, client_info->stat_.actor_id(&client_info->stat_), mtproxy_manager_.get());
 
     if (method != "deletewebhook" && method != "setwebhook") {
       auto bot_token_with_dc = PSTRING() << query->token() << (query->is_test_dc() ? ":T" : "");
@@ -315,6 +320,8 @@ td::int64 ClientManager::get_tqueue_id(td::int64 user_id, bool is_test_dc) {
 }
 
 void ClientManager::start_up() {
+  mtproxy_manager_ = td::create_actor<MTProxyManager>("MTProxyManager", parameters_);
+
   // init tqueue
   {
     auto load_start_time = td::Time::now();
@@ -598,6 +605,7 @@ void ClientManager::close_db() {
 
 void ClientManager::finish_close() {
   LOG(WARNING) << "Stop ClientManager";
+  mtproxy_manager_.reset();
   auto promises = std::move(close_promises_);
   for (auto &promise : promises) {
     promise.set_value(td::Unit());

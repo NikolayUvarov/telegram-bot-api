@@ -6,6 +6,7 @@
 //
 #pragma once
 
+#include "telegram-bot-api/MTProxy.h"
 #include "telegram-bot-api/Query.h"
 #include "telegram-bot-api/Stats.h"
 #include "telegram-bot-api/WebhookActor.h"
@@ -37,13 +38,15 @@
 namespace telegram_bot_api {
 
 struct ClientParameters;
+class MTProxyManager;
 
 namespace td_api = td::td_api;
 
 class Client final : public WebhookActor::Callback {
  public:
   Client(td::ActorShared<> parent, const td::string &bot_token, bool is_test_dc, td::int64 tqueue_id,
-         std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor);
+         std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor,
+         td::ActorId<MTProxyManager> mtproxy_manager);
   Client(const Client &) = delete;
   Client &operator=(const Client &) = delete;
   Client(Client &&) = delete;
@@ -53,6 +56,9 @@ class Client final : public WebhookActor::Callback {
   void send(PromisedQueryPtr query) final;
 
   void close();
+
+  // connects to Telegram through the MTProxy or without a proxy if it is empty
+  void set_mtproxy(MTProxy mtproxy);
 
   // for stats
   ServerBotInfo get_bot_info() const;
@@ -275,6 +281,7 @@ class Client final : public WebhookActor::Callback {
   class JsonCustomJson;
 
   class TdOnOkCallback;
+  class TdOnGetProxiesCallback;
   class TdOnAuthorizationCallback;
   class TdOnInitCallback;
   class TdOnGetUserProfilePhotosCallback;
@@ -498,6 +505,8 @@ class Client final : public WebhookActor::Callback {
   void on_closed();
 
   void finish_closing();
+
+  void stop_mtproxy_updates();
 
   void clear_tqueue();
 
@@ -1792,6 +1801,9 @@ class Client final : public WebhookActor::Callback {
   std::shared_ptr<const ClientParameters> parameters_;
 
   td::ActorId<BotStatActor> stat_actor_;
+
+  td::ActorId<MTProxyManager> mtproxy_manager_;
+  bool is_mtproxy_client_ = false;  // the client is registered in MTProxyManager
 };
 
 }  // namespace telegram_bot_api

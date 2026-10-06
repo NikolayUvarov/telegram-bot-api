@@ -7,6 +7,7 @@
 #include "telegram-bot-api/Client.h"
 
 #include "telegram-bot-api/ClientParameters.h"
+#include "telegram-bot-api/MTProxyManager.h"
 
 #include "td/db/TQueue.h"
 
@@ -42,14 +43,16 @@ using td_api::make_object;
 using td_api::move_object_as;
 
 Client::Client(td::ActorShared<> parent, const td::string &bot_token, bool is_test_dc, int64 tqueue_id,
-               std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor)
+               std::shared_ptr<const ClientParameters> parameters, td::ActorId<BotStatActor> stat_actor,
+               td::ActorId<MTProxyManager> mtproxy_manager)
     : parent_(std::move(parent))
     , bot_token_(bot_token)
     , bot_token_id_("<unknown>")
     , is_test_dc_(is_test_dc)
     , tqueue_id_(tqueue_id)
     , parameters_(std::move(parameters))
-    , stat_actor_(std::move(stat_actor)) {
+    , stat_actor_(std::move(stat_actor))
+    , mtproxy_manager_(std::move(mtproxy_manager)) {
   static auto is_inited = init_methods();
   CHECK(is_inited);
 }
@@ -6736,6 +6739,28 @@ class Client::TdOnOkCallback final : public TdQueryCallback {
   }
 };
 
+class Client::TdOnGetProxiesCallback final : public TdQueryCallback {
+ public:
+  explicit TdOnGetProxiesCallback(Client *client) : client_(client) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    if (result->get_id() == td_api::error::ID) {
+      return;
+    }
+    CHECK(result->get_id() == td_api::addedProxies::ID);
+    auto proxies = move_object_as<td_api::addedProxies>(result);
+    for (auto &proxy : proxies->proxies_) {
+      if (!proxy->is_enabled_) {
+        client_->send_request(make_object<td_api::removeProxy>(proxy->id_), td::make_unique<TdOnOkCallback>());
+      }
+    }
+  }
+
+ private:
+  Client *client_;
+};
+
 class Client::TdOnAuthorizationCallback final : public TdQueryCallback {
  public:
   explicit TdOnAuthorizationCallback(Client *client) : client_(client) {
@@ -8629,6 +8654,34 @@ void Client::start_up() {
   options.net_query_stats = parameters_->net_query_stats_;
   td_client_ = td::create_actor_on_scheduler<td::ClientActor>(
       "TdClientActor", 0, td::make_unique<TdCallback>(actor_id(this)), std::move(options));
+
+  // MTProxyManager answers with set_mtproxy
+  is_mtproxy_client_ = true;
+  send_closure(mtproxy_manager_, &MTProxyManager::add_client, parent_.token(), actor_id(this));
+}
+
+void Client::set_mtproxy(MTProxy mtproxy) {
+  if (closing_ || logging_out_ || td_client_.empty()) {
+    return;
+  }
+  if (mtproxy.empty()) {
+    send_request(make_object<td_api::disableProxy>(), td::make_unique<TdOnOkCallback>());
+  } else {
+    send_request(make_object<td_api::addProxy>(
+                     make_object<td_api::proxy>(mtproxy.server_, mtproxy.port_,
+                                                make_object<td_api::proxyTypeMtproto>(mtproxy.secret_)),
+                     true, "MTProxy registry"),
+                 td::make_unique<TdOnOkCallback>());
+  }
+  // TDLib keeps proxies in the database of the bot, so the disabled ones are removed
+  send_request(make_object<td_api::getProxies>(), td::make_unique<TdOnGetProxiesCallback>(this));
+}
+
+void Client::stop_mtproxy_updates() {
+  if (is_mtproxy_client_) {
+    is_mtproxy_client_ = false;
+    send_closure(mtproxy_manager_, &MTProxyManager::remove_client, parent_.token());
+  }
 }
 
 void Client::send(PromisedQueryPtr query) {
@@ -9408,18 +9461,6 @@ void Client::on_update_authorization_state() {
                      td::make_unique<TdOnOkCallback>());
       }
 
-      // TDLib keeps the proxy in the database of the bot, so it must be disabled if --mtproxy is no longer specified
-      if (parameters_->mtproxy_.empty()) {
-        send_request(make_object<td_api::disableProxy>(), td::make_unique<TdOnOkCallback>());
-      } else {
-        const auto &mtproxy = parameters_->mtproxy_;
-        send_request(make_object<td_api::addProxy>(
-                         make_object<td_api::proxy>(mtproxy.server_, mtproxy.port_,
-                                                    make_object<td_api::proxyTypeMtproto>(mtproxy.secret_)),
-                         true, "--mtproxy"),
-                     td::make_unique<TdOnOkCallback>());
-      }
-
       auto request = make_object<td_api::setTdlibParameters>();
       request->use_test_dc_ = is_test_dc_;
       request->database_directory_ = dir_;
@@ -9451,6 +9492,7 @@ void Client::on_update_authorization_state() {
       if (!was_authorized_) {
         LOG(WARNING) << "Logged in as @" << user_info->editable_username;
         was_authorized_ = true;
+        send_closure(mtproxy_manager_, &MTProxyManager::on_client_authorized, my_id_, bot_token_);
         td::send_event(parent_, td::Event::raw(static_cast<void *>(this)));
         update_shared_unix_time_difference();
         if (!pending_updates_.empty()) {
@@ -9470,6 +9512,7 @@ void Client::on_update_authorization_state() {
         LOG(WARNING) << "Logging out";
         update_last_synchronization_error_date();
         logging_out_ = true;
+        stop_mtproxy_updates();
         if (was_authorized_ && !closing_) {
           td::send_event(parent_, td::Event::raw(nullptr));
         }
@@ -9480,6 +9523,7 @@ void Client::on_update_authorization_state() {
         LOG(WARNING) << "Closing";
         update_last_synchronization_error_date();
         closing_ = true;
+        stop_mtproxy_updates();
         if (was_authorized_ && !logging_out_) {
           td::send_event(parent_, td::Event::raw(nullptr));
         }
@@ -9922,11 +9966,17 @@ void Client::on_update(object_ptr<td_api::Object> result) {
       break;
     case td_api::updateConnectionState::ID: {
       auto update = move_object_as<td_api::updateConnectionState>(result);
-      if (update->state_->get_id() == td_api::connectionStateReady::ID) {
+      bool is_ready = update->state_->get_id() == td_api::connectionStateReady::ID;
+      if (is_ready) {
         update_last_synchronization_error_date();
         disconnection_time_ = 0;
       } else if (disconnection_time_ == 0) {
         disconnection_time_ = td::Time::now();
+      }
+      if (is_mtproxy_client_) {
+        // while updating the bot is already connected
+        bool is_connected = is_ready || update->state_->get_id() == td_api::connectionStateUpdating::ID;
+        send_closure(mtproxy_manager_, &MTProxyManager::on_client_connection_state, parent_.token(), is_connected);
       }
       break;
     }

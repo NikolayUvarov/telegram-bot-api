@@ -302,24 +302,93 @@ int main(int argc, char *argv[]) {
                                }
                                return parameters->webhook_proxy_ip_address_.init_host_port(address.str());
                              });
+  auto &mtproxy_options = parameters->mtproxy_options_;
   options.add_checked_option(
       '\0', "mtproxy",
       "MTProxy server for connections to Telegram as a link tg://proxy?server=...&port=...&secret=... "
-      "or https://t.me/proxy?... or in the format host:port:secret (defaults to the value of the TELEGRAM_MTPROXY "
-      "environment variable)",
+      "or https://t.me/proxy?... or in the format host:port:secret; can be repeated, the servers are added to the "
+      "MTProxy registry (defaults to the space-separated list in the TELEGRAM_MTPROXY environment variable)",
       [&](td::Slice link) {
-        TRY_RESULT_ASSIGN(parameters->mtproxy_, MTProxy::parse(link));
+        TRY_RESULT(proxy, MTProxy::parse(link));
+        mtproxy_options.proxies_.push_back(std::move(proxy));
         return td::Status::OK();
       });
+  options.add_option('\0', "mtproxy-file",
+                     "file with MTProxy servers for the MTProxy registry, one per line; it is reread when changed "
+                     "(defaults to the value of the TELEGRAM_MTPROXY_FILE environment variable)",
+                     td::OptionParser::parse_string(mtproxy_options.file_));
+  td::string mtproxy_admins;
+  options.add_option('\0', "mtproxy-admins",
+                     "comma-separated identifiers of bots allowed to manage the MTProxy registry (defaults to the "
+                     "value of the TELEGRAM_MTPROXY_ADMINS environment variable)",
+                     td::OptionParser::parse_string(mtproxy_admins));
+  td::int32 mtproxy_check_interval = 600;
+  options.add_checked_option(
+      '\0', "mtproxy-check-interval",
+      PSLICE() << "interval between checks of MTProxy servers in seconds (default is " << mtproxy_check_interval << ")",
+      td::OptionParser::parse_integer(mtproxy_check_interval));
+  td::int32 mtproxy_switch_timeout = 60;
+  options.add_checked_option('\0', "mtproxy-switch-timeout",
+                             PSLICE() << "time in seconds, after which a bot without connection to Telegram is "
+                                         "switched to another MTProxy (default is "
+                                      << mtproxy_switch_timeout << ")",
+                             td::OptionParser::parse_integer(mtproxy_switch_timeout));
+  td::int32 mtproxy_expire = 72;
+  options.add_checked_option('\0', "mtproxy-expire",
+                             PSLICE() << "time in hours, after which a non-working MTProxy added by a bot is removed "
+                                         "(default is "
+                                      << mtproxy_expire << ")",
+                             td::OptionParser::parse_integer(mtproxy_expire));
+  options.add_checked_option(
+      '\0', "mtproxy-max",
+      PSLICE() << "maximum number of MTProxy servers in the registry (default is " << mtproxy_options.max_count_ << ")",
+      td::OptionParser::parse_integer(mtproxy_options.max_count_));
   options.add_check([&] {
-    auto mtproxy = std::getenv("TELEGRAM_MTPROXY");
-    if (parameters->mtproxy_.empty() && mtproxy != nullptr && mtproxy[0] != '\0') {
-      auto r_mtproxy = MTProxy::parse(td::Slice(mtproxy));
-      if (r_mtproxy.is_error()) {
-        return td::Status::Error(PSLICE() << "Invalid TELEGRAM_MTPROXY: " << r_mtproxy.error().message());
+    auto get_env = [](const char *name) {
+      auto value = std::getenv(name);
+      return value == nullptr ? td::string() : td::string(value);
+    };
+    auto mtproxy_env = get_env("TELEGRAM_MTPROXY");
+    if (mtproxy_options.proxies_.empty() && !td::trim(mtproxy_env).empty()) {
+      for (auto link : td::full_split(td::trim(td::Slice(mtproxy_env)), ' ')) {
+        if (td::trim(link).empty()) {
+          continue;
+        }
+        auto r_proxy = MTProxy::parse(td::trim(link));
+        if (r_proxy.is_error()) {
+          return td::Status::Error(PSLICE() << "Invalid TELEGRAM_MTPROXY: " << r_proxy.error().message());
+        }
+        mtproxy_options.proxies_.push_back(r_proxy.move_as_ok());
       }
-      parameters->mtproxy_ = r_mtproxy.move_as_ok();
     }
+    if (mtproxy_options.file_.empty()) {
+      mtproxy_options.file_ = get_env("TELEGRAM_MTPROXY_FILE");
+    }
+    if (mtproxy_admins.empty()) {
+      mtproxy_admins = get_env("TELEGRAM_MTPROXY_ADMINS");
+    }
+    for (auto admin : td::full_split(td::Slice(mtproxy_admins), ',')) {
+      admin = td::trim(admin);
+      if (admin.empty()) {
+        continue;
+      }
+      auto r_bot_id = td::to_integer_safe<td::int64>(admin);
+      if (r_bot_id.is_error() || r_bot_id.ok() <= 0) {
+        return td::Status::Error(PSLICE() << "Invalid bot identifier \"" << admin
+                                          << "\" in --mtproxy-admins: the identifier is the number before ':' in "
+                                             "the token");
+      }
+      mtproxy_options.admins_.push_back(r_bot_id.ok());
+    }
+    if (mtproxy_check_interval <= 0 || mtproxy_switch_timeout <= 0 || mtproxy_expire <= 0 ||
+        mtproxy_options.max_count_ <= 0) {
+      return td::Status::Error(
+          "Values of --mtproxy-check-interval, --mtproxy-switch-timeout, --mtproxy-expire and "
+          "--mtproxy-max must be positive");
+    }
+    mtproxy_options.check_interval_ = mtproxy_check_interval;
+    mtproxy_options.switch_timeout_ = mtproxy_switch_timeout;
+    mtproxy_options.expire_time_ = mtproxy_expire * 3600.0;
     return td::Status::OK();
   });
   options.add_check([&] {
@@ -517,9 +586,6 @@ int main(int argc, char *argv[]) {
   // LOG(WARNING) << "Bot API server with commit " << td::GitInfo::commit() << ' '
   //              << (td::GitInfo::is_dirty() ? "(dirty)" : "") << " started";
   LOG(WARNING) << "Bot API " << parameters->version_ << " server started";
-  if (!parameters->mtproxy_.empty()) {
-    LOG(WARNING) << "Connect to Telegram through MTProxy " << parameters->mtproxy_;
-  }
 
   td::ConcurrentScheduler sched(SharedData::get_thread_count() - 1, cpu_affinity);
 
