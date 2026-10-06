@@ -9408,6 +9408,18 @@ void Client::on_update_authorization_state() {
                      td::make_unique<TdOnOkCallback>());
       }
 
+      // TDLib keeps the proxy in the database of the bot, so it must be disabled if --mtproxy is no longer specified
+      if (parameters_->mtproxy_.empty()) {
+        send_request(make_object<td_api::disableProxy>(), td::make_unique<TdOnOkCallback>());
+      } else {
+        const auto &mtproxy = parameters_->mtproxy_;
+        send_request(make_object<td_api::addProxy>(
+                         make_object<td_api::proxy>(mtproxy.server_, mtproxy.port_,
+                                                    make_object<td_api::proxyTypeMtproto>(mtproxy.secret_)),
+                         true, "--mtproxy"),
+                     td::make_unique<TdOnOkCallback>());
+      }
+
       auto request = make_object<td_api::setTdlibParameters>();
       request->use_test_dc_ = is_test_dc_;
       request->database_directory_ = dir_;

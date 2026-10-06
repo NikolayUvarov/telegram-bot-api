@@ -9,6 +9,7 @@
 #include "telegram-bot-api/HttpConnection.h"
 #include "telegram-bot-api/HttpServer.h"
 #include "telegram-bot-api/HttpStatConnection.h"
+#include "telegram-bot-api/MTProxy.h"
 #include "telegram-bot-api/Stats.h"
 #include "telegram-bot-api/Watchdog.h"
 
@@ -301,6 +302,26 @@ int main(int argc, char *argv[]) {
                                }
                                return parameters->webhook_proxy_ip_address_.init_host_port(address.str());
                              });
+  options.add_checked_option(
+      '\0', "mtproxy",
+      "MTProxy server for connections to Telegram as a link tg://proxy?server=...&port=...&secret=... "
+      "or https://t.me/proxy?... or in the format host:port:secret (defaults to the value of the TELEGRAM_MTPROXY "
+      "environment variable)",
+      [&](td::Slice link) {
+        TRY_RESULT_ASSIGN(parameters->mtproxy_, MTProxy::parse(link));
+        return td::Status::OK();
+      });
+  options.add_check([&] {
+    auto mtproxy = std::getenv("TELEGRAM_MTPROXY");
+    if (parameters->mtproxy_.empty() && mtproxy != nullptr && mtproxy[0] != '\0') {
+      auto r_mtproxy = MTProxy::parse(td::Slice(mtproxy));
+      if (r_mtproxy.is_error()) {
+        return td::Status::Error(PSLICE() << "Invalid TELEGRAM_MTPROXY: " << r_mtproxy.error().message());
+      }
+      parameters->mtproxy_ = r_mtproxy.move_as_ok();
+    }
+    return td::Status::OK();
+  });
   options.add_check([&] {
     if (parameters->api_id_ <= 0 || parameters->api_hash_.empty()) {
       return td::Status::Error("You must provide valid api-id and api-hash obtained at https://my.telegram.org");
@@ -496,6 +517,9 @@ int main(int argc, char *argv[]) {
   // LOG(WARNING) << "Bot API server with commit " << td::GitInfo::commit() << ' '
   //              << (td::GitInfo::is_dirty() ? "(dirty)" : "") << " started";
   LOG(WARNING) << "Bot API " << parameters->version_ << " server started";
+  if (!parameters->mtproxy_.empty()) {
+    LOG(WARNING) << "Connect to Telegram through MTProxy " << parameters->mtproxy_;
+  }
 
   td::ConcurrentScheduler sched(SharedData::get_thread_count() - 1, cpu_affinity);
 

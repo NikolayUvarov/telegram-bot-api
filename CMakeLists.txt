@@ -66,6 +66,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/ClientManager.cpp
   telegram-bot-api/HttpConnection.cpp
   telegram-bot-api/HttpStatConnection.cpp
+  telegram-bot-api/MTProxy.cpp
   telegram-bot-api/Query.cpp
   telegram-bot-api/Stats.cpp
   telegram-bot-api/Watchdog.cpp
@@ -77,6 +78,7 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/HttpConnection.h
   telegram-bot-api/HttpServer.h
   telegram-bot-api/HttpStatConnection.h
+  telegram-bot-api/MTProxy.h
   telegram-bot-api/Query.h
   telegram-bot-api/Stats.h
   telegram-bot-api/Watchdog.h
@@ -85,7 +87,7 @@ set(TELEGRAM_BOT_API_SOURCE
 
 add_executable(telegram-bot-api ${TELEGRAM_BOT_API_SOURCE})
 target_include_directories(telegram-bot-api PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
-target_link_libraries(telegram-bot-api PRIVATE memprof tdactor tdcore tddb tdnet tdutils)
+target_link_libraries(telegram-bot-api PRIVATE memprof tdactor tdcore tddb tdmtproto tdnet tdutils)
 
 install(TARGETS telegram-bot-api RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 if (MSVC AND VCPKG_TOOLCHAIN)

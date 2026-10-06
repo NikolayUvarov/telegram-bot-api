@@ -6,10 +6,15 @@ If you've got any questions about bots or would like to report an issue with you
 
 Please note that only global Bot API issues that affect all bots are suitable for this repository.
 
+**This fork** can connect to Telegram through an [MTProxy](#mtproxy) server, where Telegram is blocked.
+Bots work with the server as with `https://api.telegram.org`, e.g. with
+[laser_tele](https://github.com/NikolayUvarov/laser_tele) (`APIURL`) or [laser_tele_rs](https://github.com/NikolayUvarov/laser_tele_rs) (`api_url`).
+
 ## Table of Contents
 - [Installation](#installation)
 - [Dependencies](#dependencies)
 - [Usage](#usage)
+- [Connecting to Telegram through MTProxy](#mtproxy)
 - [Documentation](#documentation)
 - [Moving a bot to a local server](#switching)
 - [Moving a bot from one local server to another](#moving)
@@ -64,6 +69,44 @@ To enable Bot API features not available at `https://api.telegram.org`, specify 
 The Telegram Bot API server accepts only HTTP requests, so a TLS termination proxy needs to be used to handle remote HTTPS requests.
 
 By default the Telegram Bot API server is launched on the port 8081, which can be changed using the option `--http-port`.
+
+<a name="mtproxy"></a>
+## Connecting to Telegram through MTProxy
+
+The option `--mtproxy` (or the `TELEGRAM_MTPROXY` environment variable) sets an MTProxy server,
+through which all bots of the server connect to Telegram. It accepts a link, as published in channels with proxies,
+or the address and the secret:
+
+```sh
+telegram-bot-api --api-id=<arg> --api-hash=<arg> --mtproxy='tg://proxy?server=proxy.example.com&port=443&secret=ee...'
+telegram-bot-api --api-id=<arg> --api-hash=<arg> --mtproxy='https://t.me/proxy?server=proxy.example.com&port=443&secret=dd...'
+telegram-bot-api --api-id=<arg> --api-hash=<arg> --mtproxy=proxy.example.com:443:ee...
+```
+
+All kinds of secrets are supported: simple, `dd` and `ee` (fake TLS), in hexadecimal or base64url encoding.
+The proxy is used for connections to Telegram only: requests of bots to the server and webhooks don't go through it
+(webhooks use `--proxy`). The proxy sees neither the tokens of bots nor their messages, connections to Telegram are encrypted.
+TDLib keeps the proxy in the database of every bot; when the server is started without `--mtproxy`, the proxy is disabled.
+
+Then bots send requests to the server instead of `https://api.telegram.org`, e.g. `http://localhost:8081`.
+Before that a bot must be [moved to the local server](#switching) with the method `logOut`.
+
+The server can be run in Docker, the image is built from the sources (cloned with `--recursive`):
+
+```sh
+docker build -t telegram-bot-api .
+docker run -d -p 8081:8081 -v telegram-bot-api:/var/lib/telegram-bot-api \
+  -e TELEGRAM_API_ID=<arg> -e TELEGRAM_API_HASH=<arg> -e TELEGRAM_MTPROXY='tg://proxy?server=...' telegram-bot-api
+```
+
+Building TDLib takes a lot of memory: with less than 4 GB per core limit the number of parallel jobs,
+`docker build --build-arg JOBS=2 ...` or `cmake --build build -j2`.
+
+Tests of the option need neither Telegram nor a real proxy, a fake MTProxy checks the connections of TDLib:
+
+```sh
+python3 tests/mtproxy_test.py build/telegram-bot-api
+```
 
 <a name="documentation"></a>
 ## Documentation
